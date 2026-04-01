@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "arxiv-honyaku"
+version = "0.1.0"
+description = "Translate arXiv TeX sources in resilient chunks and compile a PDF."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.40.0",
+  "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+web = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.11.0",
+]
+
+[project.scripts]
+arxiv-honyaku = "arxiv_honyaku.interfaces.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/arxiv_honyaku"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

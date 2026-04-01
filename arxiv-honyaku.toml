@@ -1,0 +1,18 @@
+[llm]
+provider = "deepseek"
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com"
+retry_temperatures = [0.0, 0.2, 0.4]
+
+[run]
+workspace_root = "./runs"
+max_chunk_chars = 2200
+concurrency = 300
+max_retries = 3
+translate_section_titles = false
+japanese_layout_mode = "adaptive" # ["safe", "adaptive", "preserve"]
+japanese_font_mode = "paper-like" # ["compat", "paper-like"]
+
+[prompts]
+catalog_path = "./prompts/translation-prompts.toml"
+profile = "ja_default"

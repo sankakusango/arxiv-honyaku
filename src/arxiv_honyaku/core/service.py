@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
+import re
 import shutil
 
 from arxiv_honyaku.core.arxiv_id import normalize_arxiv_ref, path_safe_arxiv_id
@@ -99,6 +100,16 @@ class ArxivHonyakuService:
         source_dir = run_dir / "source"
         translated_dir = run_dir / "translated"
         build_dir = run_dir / "build"
+
+        LOGGER.info(
+            "Run settings: force=%s max_chunk_chars=%s translate_section_titles=%s "
+            "japanese_layout_mode=%s japanese_font_mode=%s",
+            request.force,
+            request.max_chunk_chars,
+            request.translate_section_titles,
+            request.japanese_layout_mode,
+            request.japanese_font_mode,
+        )
 
         if request.force and run_dir.exists():
             shutil.rmtree(run_dir)
@@ -432,18 +443,62 @@ def _prepare_translated_main_tex_for_compilation(
     Returns:
         None: 常に ``None``.
     """
+    LOGGER.info(
+        "Preparing translated TeX for Japanese compilation: main=%s layout_mode=%s font_mode=%s",
+        translated_main_tex,
+        japanese_layout_mode,
+        japanese_font_mode,
+    )
     if not translated_project_contains_japanese(translated_dir):
+        LOGGER.info(
+            "Skipping Japanese TeX preparation because no Japanese characters were found under: %s",
+            translated_dir,
+        )
         return
+
+    before_text = translated_main_tex.read_text(encoding="utf-8")
+    before_cjk_family = _extract_cjk_family(before_text)
+    before_has_ipaex = "\\usepackage{ipaex-type1}" in before_text
 
     prepare_translated_tex_tree_for_japanese_layout(
         translated_dir,
         mode=japanese_layout_mode,
     )
+    after_layout_text = translated_main_tex.read_text(encoding="utf-8")
+    if after_layout_text != before_text:
+        LOGGER.info(
+            "Japanese layout normalization changed main TeX before font injection."
+        )
     prepared_text = prepare_main_tex_for_japanese_pdf_compilation(
-        translated_main_tex.read_text(encoding="utf-8"),
+        after_layout_text,
         font_mode=japanese_font_mode,
     )
+    after_cjk_family = _extract_cjk_family(prepared_text)
+    after_has_ipaex = "\\usepackage{ipaex-type1}" in prepared_text
+    LOGGER.info(
+        "Japanese TeX preparation summary: cjk_family=%s->%s ipaex-type1=%s->%s",
+        before_cjk_family,
+        after_cjk_family,
+        before_has_ipaex,
+        after_has_ipaex,
+    )
+    if japanese_font_mode == "paper-like" and after_cjk_family != "ipxm":
+        LOGGER.warning(
+            "paper-like mode requested but CJK family is not ipxm after preparation: %s",
+            after_cjk_family,
+        )
     translated_main_tex.write_text(prepared_text, encoding="utf-8")
+
+
+_CJK_FAMILY_RE = re.compile(r"\\begin\{CJK\}\{UTF8\}\{([^}]+)\}")
+
+
+def _extract_cjk_family(tex_text: str) -> str:
+    """TeX本文中の CJK family 指定（例: min/ipxm）を抽出する."""
+    match = _CJK_FAMILY_RE.search(tex_text)
+    if match is None:
+        return "(none)"
+    return match.group(1)
 
 
 def _normalize_translated_chunks(

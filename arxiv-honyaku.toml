@@ -10,8 +10,10 @@ max_chunk_chars = 2200
 concurrency = 300
 max_retries = 3
 translate_section_titles = false
-japanese_layout_mode = "adaptive" # ["safe", "adaptive", "preserve"]
+japanese_layout_mode = "safe" # ["preserve", "adaptive", "safe"]
 japanese_font_mode = "paper-like" # ["compat", "paper-like"]
+allow_shell_escape = true
+texlive_versions = [2023] # 例: 2015 / [2015, 2013] / [2015, 2015]
 
 [prompts]
 catalog_path = "./prompts/translation-prompts.toml"

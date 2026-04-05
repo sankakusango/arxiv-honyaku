@@ -47,6 +47,9 @@ class RunSettings:
         translate_section_titles: ``False`` の場合, ``\\section`` 系タイトルを原文のまま残す.
         japanese_layout_mode: 日本語組版で崩れやすいレイアウトをどこまで補正するかの方針.
         japanese_font_mode: 日本語フォントをどの程度 paper-like に寄せるかの方針.
+        allow_shell_escape: ``True`` の場合, LaTeX コンパイルで ``-shell-escape`` を有効化する.
+        texlive_versions: コンパイル時に順番に試す TeX Live バージョン列.
+            ``None`` の場合は ``/opt/texlive`` 配下の年ディレクトリを自動検出して使う.
     """
 
     workspace_root: Path
@@ -54,8 +57,10 @@ class RunSettings:
     concurrency: int = 10
     max_retries: int = 3
     translate_section_titles: bool = False
-    japanese_layout_mode: JapaneseLayoutMode = "safe"
-    japanese_font_mode: JapaneseFontMode = "compat"
+    japanese_layout_mode: JapaneseLayoutMode = "preserve"
+    japanese_font_mode: JapaneseFontMode = "paper-like"
+    allow_shell_escape: bool = False
+    texlive_versions: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -123,8 +128,10 @@ class AppSettings:
                 concurrency=10,
                 max_retries=3,
                 translate_section_titles=False,
-                japanese_layout_mode="safe",
-                japanese_font_mode="compat",
+                japanese_layout_mode="preserve",
+                japanese_font_mode="paper-like",
+                allow_shell_escape=False,
+                texlive_versions=None,
             ),
             prompts=PromptCatalogSettings(
                 catalog_path=DEFAULT_PROMPT_CATALOG_PATH.resolve(),
@@ -199,6 +206,14 @@ def _load_from_toml(path: Path, *, base: AppSettings) -> AppSettings:
             )
         )
     )
+    allow_shell_escape = _parse_bool_from_value(
+        run_table.get("allow_shell_escape", base.run.allow_shell_escape),
+        name="run.allow_shell_escape",
+    )
+    texlive_versions = _parse_texlive_versions(
+        run_table.get("texlive_versions", base.run.texlive_versions),
+        name="run.texlive_versions",
+    )
 
     catalog_raw = prompts_table.get("catalog_path", str(base.prompts.catalog_path))
     profile = _require_non_empty_str(
@@ -223,6 +238,8 @@ def _load_from_toml(path: Path, *, base: AppSettings) -> AppSettings:
             translate_section_titles=translate_section_titles,
             japanese_layout_mode=japanese_layout_mode,
             japanese_font_mode=japanese_font_mode,
+            allow_shell_escape=allow_shell_escape,
+            texlive_versions=texlive_versions,
         ),
         prompts=PromptCatalogSettings(
             catalog_path=catalog_path,
@@ -240,18 +257,21 @@ def _apply_standard_env_fallback(settings: AppSettings) -> AppSettings:
     Returns:
         AppSettings: 環境変数補完を反映した統合設定.
     """
-    if settings.llm.provider not in {"openai", "deepseek"}:
-        return settings
+    model = os.getenv("ARXIV_HONYAKU_LLM_MODEL") or settings.llm.model
 
     api_key = settings.llm.api_key
     if api_key is None and settings.llm.provider == "deepseek":
         api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    elif api_key is None:
+    elif api_key is None and settings.llm.provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
+
+    if model == settings.llm.model and api_key == settings.llm.api_key:
+        return settings
+
     return AppSettings(
         llm=LLMSettings(
             provider=settings.llm.provider,
-            model=settings.llm.model,
+            model=model,
             base_url=settings.llm.base_url,
             api_key=api_key,
             retry_temperatures=settings.llm.retry_temperatures,
@@ -434,6 +454,54 @@ def _parse_retry_temperatures(value: object, *, name: str) -> tuple[float, ...]:
             raise ValueError(f"{name}[{index}] must be between 0 and 2")
         parsed_values.append(parsed)
     return tuple(parsed_values)
+
+
+def _parse_texlive_versions(
+    value: object,
+    *,
+    name: str,
+) -> tuple[str, ...] | None:
+    """TeX Live バージョン指定を検証し, タプルへ正規化する.
+
+    Args:
+        value: TOML から得た ``run.texlive_versions`` 値.
+        name: エラーメッセージに表示する設定名.
+
+    Returns:
+        tuple[str, ...] | None:
+            ``None`` の場合は自動検出, それ以外は指定順のバージョン列.
+
+    Raises:
+        ValueError: 型が不正, 空配列, 空文字, または 0 以下の整数を含む場合.
+    """
+    if value is None:
+        return None
+
+    raw_items: list[object]
+    if isinstance(value, list):
+        if not value:
+            raise ValueError(f"{name} must not be empty")
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+
+    parsed_items: list[str] = []
+    for index, item in enumerate(raw_items):
+        if isinstance(item, bool):
+            raise ValueError(f"{name}[{index}] must be a string or integer")
+        if isinstance(item, int):
+            if item <= 0:
+                raise ValueError(f"{name}[{index}] must be > 0")
+            parsed_items.append(str(item))
+            continue
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                raise ValueError(f"{name}[{index}] must not be empty")
+            parsed_items.append(text)
+            continue
+        raise ValueError(f"{name}[{index}] must be a string or integer")
+    return tuple(parsed_items)
 
 
 def _maybe_str(value: object) -> str | None:

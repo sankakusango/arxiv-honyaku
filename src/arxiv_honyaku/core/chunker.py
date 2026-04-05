@@ -248,9 +248,11 @@ def _split_tex_into_parts(text: str) -> list[_TeXPart]:
         stripped = line.lstrip()
 
         if bibliography_started:
-            push_text(line, translate=False)
-            line_index += 1
-            continue
+            if "\\appendix" not in stripped and "\\begin{appendices}" not in stripped:
+                push_text(line, translate=False)
+                line_index += 1
+                continue
+            bibliography_started = False
 
         if "\\begin{document}" in line:
             document_started = True

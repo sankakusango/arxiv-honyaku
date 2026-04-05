@@ -1,0 +1,19 @@
+[llm]
+provider = "ollama"
+model = "translategemma:4b"
+base_url = "http://ollama:11434/v1"
+retry_temperatures = [0.0, 0.2, 0.4]
+
+[run]
+workspace_root = "./runs"
+max_chunk_chars = 2200
+concurrency = 10
+max_retries = 3
+translate_section_titles = false
+japanese_layout_mode = "safe"
+japanese_font_mode = "paper-like"
+texlive_versions = [2025, 2023]
+
+[prompts]
+catalog_path = "./prompts/translation-prompts.toml"
+profile = "translategemma_ja"

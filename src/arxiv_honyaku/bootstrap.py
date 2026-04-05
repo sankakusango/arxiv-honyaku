@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from arxiv_honyaku.adapters.arxiv_http import HttpArxivDownloader
 from arxiv_honyaku.adapters.http_llm import OpenAICompatibleTranslator
 from arxiv_honyaku.adapters.latexmk import LatexmkCompiler
@@ -13,6 +15,8 @@ from arxiv_honyaku.core.ports import ProgressReporter
 from arxiv_honyaku.core.service import ArxivHonyakuService
 from arxiv_honyaku.core.translation_runner import ChunkTranslationRunner
 from arxiv_honyaku.prompts import load_prompt_profile
+
+LOGGER = logging.getLogger("arxiv_honyaku.bootstrap")
 
 
 def build_service(
@@ -38,12 +42,20 @@ def build_service(
         max_retries=settings.run.max_retries,
         retry_temperatures=settings.llm.retry_temperatures,
     )
+    LOGGER.info(
+        "Compiler settings: allow_shell_escape=%s texlive_versions=%s",
+        settings.run.allow_shell_escape,
+        settings.run.texlive_versions if settings.run.texlive_versions else "auto",
+    )
     return ArxivHonyakuService(
         downloader=HttpArxivDownloader(),
         extractor=TarArchiveExtractor(),
         tex_locator=TeXMainFileLocator(),
         translator=translator,
-        compiler=LatexmkCompiler(),
+        compiler=LatexmkCompiler(
+            allow_shell_escape=settings.run.allow_shell_escape,
+            texlive_versions=settings.run.texlive_versions,
+        ),
         progress_reporter=progress_reporter or NullProgressReporter(),
     )
 

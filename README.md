@@ -39,6 +39,7 @@ max_retries = 3
 translate_section_titles = false
 japanese_layout_mode = "adaptive" # "safe" | "adaptive" | "preserve"
 japanese_font_mode = "compat"     # "compat" | "paper-like"
+texlive_versions = [2025, 2023]   # 例: 2015 / [2015, 2013] / [2015, 2015]
 
 [prompts]
 catalog_path = "./prompts/translation-prompts.toml"
@@ -54,6 +55,9 @@ profile = "ja_default"
 `japanese_layout_mode` は日本語化後のレイアウト補正方針です。`safe` は安全優先, `adaptive` は元の雰囲気を残しつつ回り込みを崩れにくくし, `preserve` は原文のレイアウト構造をそのまま残します。
 
 `japanese_font_mode = "paper-like"` を使うと, 現在の `pdflatex + CJKutf8` ベースの動作は保ったまま, 日本語フォントだけ IPAex 明朝寄りへ切り替えます。従来どおりの挙動を使いたい場合は `compat` のままにしてください。
+
+`texlive_versions` は PDF コンパイル時に試す TeX Live バージョン順です。  
+例えば `[2025, 2023]` なら 2025 で失敗したとき 2023 を試します。`2015` のような単体指定や `[2015, 2015]` のような同一バージョン再試行も可能です。未指定時は `/opt/texlive` 配下から年ディレクトリを自動検出して降順で試します。
 
 `ollama` / `vllm` も OpenAI 互換 API として同じクライアント経由で実行します。
 ただし `TranslateGemma` は推奨プロンプト形式が通常のchatモデルと異なるため, `profile = "translategemma_ja"` を使ってください。
@@ -106,7 +110,7 @@ docker compose -f docker-compose.yml -f docker-compose.ollama.yml exec ollama ol
 ```
 
 ブラウザで `http://localhost:8000` を開きます。  
-この構成では `arxiv-honyaku.ollama.auto.toml` が自動で使われます。
+この構成では `arxiv-honyaku.ollama.toml` が使われます。
 
 ## ゼロから実行, Ollama + Small Translate Gemma で論文を和訳
 
@@ -129,10 +133,9 @@ bash scripts/run_ollama_gemma_translate.sh --force 1706.03762
 このスクリプトは以下を順番に実行します.
 
 1. `nvidia-smi` でGPU VRAMを取得し, `translategemma` のサイズを選択.
-2. `arxiv-honyaku.ollama.auto.toml` を生成.
-3. `docker compose` で `web` と `ollama` を起動.
-4. 選択モデルを `ollama pull`.
-5. `arxiv-honyaku` CLIで実際に和訳を実行.
+2. `docker compose` で `web` と `ollama` を起動.
+3. 選択モデルを `ollama pull`.
+4. 選択モデル名を環境変数で渡して `arxiv-honyaku` CLIで和訳を実行.
 
 すでに `./runs/<arxiv-id>/build/*.pdf` がある場合は, スクリプト側でも最初に検出して全体をスキップします.  
 完全にやり直したい場合は `--force` を付けてください。

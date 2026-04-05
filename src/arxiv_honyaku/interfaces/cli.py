@@ -63,6 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to TOML config file (default: arxiv-honyaku.toml)",
     )
     parser.add_argument(
+        "-f",
         "--force",
         action="store_true",
         help="Ignore previous successful outputs and rerun translation from scratch.",

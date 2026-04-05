@@ -371,7 +371,7 @@ class ChunkTranslationRunner:
     ) -> None:
         """成功した救済経路の利用をログへ明示する.
 
-        現在は, 最も保守的な ``strict_segment`` が使われたときだけ warning を出す.
+        現在は, 最も保守的な ``strict_segment`` が使われたとき debug を出す.
         direct や通常 segment は通常の成功として扱う.
 
         Args:
@@ -385,7 +385,7 @@ class ChunkTranslationRunner:
         """
         if strategy != "strict_segment":
             return
-        LOGGER.warning(
+        LOGGER.debug(
             "Used strict segment fallback for translated chunk. file=%s line=%s chunk=%s kind=%s reason=%s preview=%s",
             relative_path,
             chunk.start_line,

@@ -29,6 +29,13 @@ _WRAP_BLOCK_RE = re.compile(
     r"\\begin\{wrap(?P<kind>figure|table)\}(?:\[[^\]]*\])?\{(?P<side>[^{}]*)\}\{(?P<width>[^{}]*)\}(?P<body>.*?)\\end\{wrap(?P=kind)\}",
     re.S,
 )
+_FLOAT_BLOCK_RE = re.compile(
+    r"\\begin\{(?P<envname>figure\*?|table\*?)\}(?P<opt>\[[^\]]*\])?"
+    r"(?P<body>.*?)"
+    r"\\end\{(?P=envname)\}",
+    re.S,
+)
+_NEGATIVE_VSPACE_RE = re.compile(r"\\vspace\*?\{\s*-[^{}]+\}")
 _RISKY_JAPANESE_BOUNDARY_COMMAND_RE = re.compile(
     r"(\\(?:SI|SIlist|SIrange|num|numlist|numrange|qty|qtyproduct|qtyrange)"
     r"(?:\[[^\]]*\])?(?:\{[^{}]*\})+)(?="
@@ -77,11 +84,17 @@ def prepare_main_tex_for_japanese_pdf_compilation(
         str: 日本語PDFコンパイル向けに整形済みのTeX全文.
     """
     prepared = tex_text
-    required_package_lines = [_CJK_PACKAGE_LINE]
-    desired_cjk_begin = _CJK_BEGIN_COMPAT
-    if font_mode == "paper-like":
-        required_package_lines.append(_IPAEX_TYPE1_PACKAGE_LINE)
+    if font_mode == "compat":
+        required_package_lines = [_CJK_PACKAGE_LINE]
+        desired_cjk_begin = _CJK_BEGIN_COMPAT
+    elif font_mode == "paper-like":
+        required_package_lines = [
+            _CJK_PACKAGE_LINE,
+            _IPAEX_TYPE1_PACKAGE_LINE,
+        ]
         desired_cjk_begin = _CJK_BEGIN_PAPER_LIKE
+    else:  # pragma: no cover - 呼び出し側の型保証を越えた防御.
+        raise ValueError(f"Unsupported Japanese font mode: {font_mode}")
 
     if "\\begin{document}" in prepared:
         package_injection = "".join(
@@ -122,13 +135,12 @@ def prepare_translated_tex_tree_for_japanese_layout(
 ) -> None:
     """日本語版で崩れやすい TeX レイアウトを木全体で保守的に整える.
 
-    まず全 ``.tex`` へ, 日本語文字が直後に来ると壊れやすいマクロ境界の
-    正規化を常に適用する. そのうえで ``mode="preserve"`` では翻訳後TeXの
-    レイアウト構造をそのまま維持する.
+    ``mode="preserve"`` では翻訳後TeXの構造をそのまま維持し, 何も変更しない.
     ``mode="adaptive"`` では, 回り込み float を左右寄せの通常 float へ変換し,
     幅と配置の雰囲気を残しつつ本文との衝突を避ける.
     ``mode="safe"`` では ``wrapfigure`` / ``wraptable`` を通常の
-    ``figure`` / ``table`` に置き換える. 回り込み図は英語原稿では成立していても,
+    ``figure`` / ``table`` に置き換える. 同時に ``figure`` / ``table`` 内の
+    過度な負の ``\\vspace`` を ``0pt`` に丸める. 回り込み図は英語原稿では成立していても,
     日本語化後は段落幅や改行位置の変化で本文と干渉しやすいためである.
 
     Args:
@@ -138,6 +150,9 @@ def prepare_translated_tex_tree_for_japanese_layout(
     Returns:
         None: 常に ``None``.
     """
+    if mode == "preserve":
+        return
+
     for tex_path in sorted(source_dir.rglob("*.tex")):
         original_text = tex_path.read_text(encoding="utf-8")
         prepared_text = _normalize_risky_japanese_macro_boundaries(original_text)
@@ -146,6 +161,7 @@ def prepare_translated_tex_tree_for_japanese_layout(
             prepared_text = _adapt_wrap_float_environments(prepared_text)
         elif mode == "safe":
             prepared_text = _replace_wrap_float_environments(prepared_text)
+            prepared_text = _neutralize_negative_vspace_in_floats(prepared_text)
         if prepared_text == original_text:
             continue
         tex_path.write_text(prepared_text, encoding="utf-8")
@@ -161,7 +177,7 @@ def _replace_wrap_float_environments(tex_text: str) -> str:
         str: 回り込み float を通常 float に置換したTeX全文.
     """
     replaced = _WRAP_BEGIN_RE.sub(
-        lambda match: f"\\begin{{{match.group(1)}}}[!t]",
+        lambda match: f"\\begin{{{match.group(1)}}}[!htbp]",
         tex_text,
     )
     return _WRAP_END_RE.sub(
@@ -252,6 +268,34 @@ def _normalize_commented_layout_commands(tex_text: str) -> str:
         str: コメント連結を安全な改行へ戻したTeX全文.
     """
     return _COMMENTED_LAYOUT_COMMAND_RE.sub(r"%\n  \1", tex_text)
+
+
+def _neutralize_negative_vspace_in_floats(tex_text: str) -> str:
+    """``figure`` / ``table`` 内の負の ``\\vspace`` を保守的に無効化する.
+
+    日本語化後は行高と改行位置が変わるため, 英語原稿で成立していた大きな負の
+    ``\\vspace`` がキャプションや本文の重なりを起こしやすい. この関数は,
+    float 環境内に限って負値指定を ``\\vspace{0pt}`` へ置き換える.
+
+    Args:
+        tex_text: 整形対象のTeX全文.
+
+    Returns:
+        str: 負の ``\\vspace`` を無効化したTeX全文.
+    """
+
+    def _replace_block(match: re.Match[str]) -> str:
+        envname = match.group("envname")
+        opt = match.group("opt") or ""
+        body = match.group("body")
+        normalized_body = _NEGATIVE_VSPACE_RE.sub(r"\\vspace{0pt}", body)
+        return (
+            f"\\begin{{{envname}}}{opt}"
+            f"{normalized_body}"
+            f"\\end{{{envname}}}"
+        )
+
+    return _FLOAT_BLOCK_RE.sub(_replace_block, tex_text)
 
 
 JapaneseLayoutMode = Literal["preserve", "adaptive", "safe"]

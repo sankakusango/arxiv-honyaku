@@ -1,0 +1,19 @@
+services:
+  web:
+    depends_on:
+      - ollama
+    volumes:
+      - ./arxiv-honyaku.ollama.toml:/app/arxiv-honyaku.toml:ro
+      - ./prompts:/app/prompts:ro
+      - ./runs:/app/runs
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  ollama-data:

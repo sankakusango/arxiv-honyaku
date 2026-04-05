@@ -38,7 +38,7 @@ class TranslateRequest:
     force: bool = False
     translate_section_titles: bool = False
     japanese_layout_mode: JapaneseLayoutMode = "safe"
-    japanese_font_mode: JapaneseFontMode = "compat"
+    japanese_font_mode: JapaneseFontMode = "paper-like"
 
 
 @dataclass(slots=True, frozen=True)

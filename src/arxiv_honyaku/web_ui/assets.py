@@ -89,6 +89,10 @@ def render_app_html(initial_state: dict[str, Any]) -> str:
 
           <section class="tab-panel active" id="tab-pdf">
             <div class="pdf-actions">
+              <div class="pdf-source-toggle" role="group" aria-label="PDF source">
+                <button class="pdf-source-button active" id="translated-pdf-button" type="button">翻訳</button>
+                <button class="pdf-source-button" id="original-pdf-button" type="button">原文</button>
+              </div>
               <a id="open-pdf-link" target="_blank" rel="noreferrer">PDFを開く</a>
             </div>
             <iframe class="pdf-frame" id="pdf-frame" title="translated PDF"></iframe>
@@ -676,13 +680,42 @@ progress {
   height: 32px;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .pdf-actions a {
   color: var(--accent-strong);
   font-weight: 650;
   font-size: 13px;
+}
+
+.pdf-source-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.pdf-source-button {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.pdf-source-button:last-child {
+  border-right: 0;
+}
+
+.pdf-source-button.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 .pdf-frame {
@@ -919,6 +952,11 @@ APP_JS = r"""
   let activeJobs = [];
   let currentWorkspace = null;
   let currentTexPath = null;
+  let currentPdfUrl = "";
+  let pdfSource = "translated";
+  let activeTab = "pdf";
+  let detailRequestSeq = 0;
+  const detailCache = new Map();
 
   const $ = (id) => document.getElementById(id);
 
@@ -975,6 +1013,7 @@ APP_JS = r"""
 
   const phaseName = (phase) => ({
     queued: "待機",
+    resolve: "確認",
     download: "取得",
     source_tree: "解析",
     prepare: "準備",
@@ -1063,6 +1102,17 @@ APP_JS = r"""
       await renderJobQueue(activeJobs);
       if (!selectedPaperId && papers.length) {
         await loadPaper(papers[0].paper_id);
+      } else if (selectedPaperId && papers.some((paper) => paper.paper_id === selectedPaperId)) {
+        const paper = papers.find((item) => item.paper_id === selectedPaperId);
+        if (detail && paper && detail.paper.updated_at !== paper.updated_at) {
+          await loadPaper(selectedPaperId, { preserveSelection: true, background: true });
+        }
+      } else if (selectedPaperId) {
+        selectedPaperId = null;
+        detail = null;
+        currentPdfUrl = "";
+        $("paper-detail").hidden = true;
+        $("empty-state").hidden = false;
       }
       scheduleJobPolling();
     } finally {
@@ -1076,20 +1126,71 @@ APP_JS = r"""
     }
   };
 
-  const loadPaper = async (paperId) => {
+  const loadPaper = async (paperId, options = {}) => {
+    const preserveSelection = Boolean(options.preserveSelection);
+    const background = Boolean(options.background);
+    const previousCandidateId = selectedCandidateId;
+    const previousWorkspace = currentWorkspace;
+    const previousTexPath = currentTexPath;
+    const seq = ++detailRequestSeq;
     selectedPaperId = paperId;
-    detail = await api(`/papers/${encodeURIComponent(paperId)}`);
-    selectedVersion = selectedVersion || detail.default_version || (detail.versions[0] && detail.versions[0].version_label);
-    if (!detail.versions.some((v) => v.version_label === selectedVersion)) {
-      selectedVersion = detail.default_version || (detail.versions[0] && detail.versions[0].version_label);
+    renderPapers();
+
+    const cached = detailCache.get(paperId);
+    if (cached && !background) {
+      detail = cached;
+      applyPaperSelectionState({ preserveSelection, previousCandidateId, previousWorkspace, previousTexPath });
+      renderDetail();
+    } else if (!background) {
+      showPaperLoading(paperId);
     }
-    selectedCandidateId = null;
+
+    const loaded = await api(`/papers/${encodeURIComponent(paperId)}`);
+    if (seq !== detailRequestSeq || selectedPaperId !== paperId) return;
+    detailCache.set(paperId, loaded);
+    detail = loaded;
+    applyPaperSelectionState({ preserveSelection, previousCandidateId, previousWorkspace, previousTexPath });
+    renderDetail();
+  };
+
+  const showPaperLoading = (paperId) => {
+    detail = null;
+    selectedCandidateId = "";
     currentWorkspace = null;
     currentTexPath = null;
     $("empty-state").hidden = true;
     $("paper-detail").hidden = false;
-    renderPapers();
-    renderDetail();
+    setText("paper-title", paperId);
+    $("arxiv-link").href = `https://arxiv.org/abs/${paperId}`;
+    $("arxiv-link").textContent = paperId;
+    $("paper-version-select").replaceChildren();
+    renderCandidateSelects([]);
+    renderPdf([]);
+    setText("build-log-status", "");
+  };
+
+  const applyPaperSelectionState = ({
+    preserveSelection,
+    previousCandidateId,
+    previousWorkspace,
+    previousTexPath,
+  }) => {
+    if (!detail) return;
+    selectedVersion = selectedVersion || detail.default_version || (detail.versions[0] && detail.versions[0].version_label);
+    if (!detail.versions.some((v) => v.version_label === selectedVersion)) {
+      selectedVersion = detail.default_version || (detail.versions[0] && detail.versions[0].version_label);
+    }
+    if (preserveSelection) {
+      selectedCandidateId = previousCandidateId;
+      currentWorkspace = previousWorkspace;
+      currentTexPath = previousTexPath;
+    } else {
+      selectedCandidateId = null;
+      currentWorkspace = null;
+      currentTexPath = null;
+    }
+    $("empty-state").hidden = true;
+    $("paper-detail").hidden = false;
   };
 
   const renderDetail = () => {
@@ -1116,9 +1217,13 @@ APP_JS = r"""
     renderCandidateSelects(candidates);
     renderPdf(candidates);
     renderPosts();
-    loadBuildLogs().catch((error) => {
-      setText("build-log-status", error.message);
-    });
+    if (activeTab === "build-logs") {
+      loadBuildLogs().catch((error) => {
+        setText("build-log-status", error.message);
+      });
+    } else {
+      setText("build-log-status", "");
+    }
   };
 
   const candidatesForVersion = () => {
@@ -1129,6 +1234,16 @@ APP_JS = r"""
   const pdfFilename = (candidate) => {
     const raw = `${candidate.paper_id}${candidate.version_label}.pdf`;
     return raw.replace(/[^A-Za-z0-9._-]+/g, "_");
+  };
+
+  const originalPdfFilename = () => {
+    if (!detail || !selectedVersion) return "paper.pdf";
+    const raw = `${detail.paper.paper_id}${selectedVersion}.pdf`;
+    return raw.replace(/[^A-Za-z0-9._-]+/g, "_");
+  };
+
+  const originalPdfUrl = () => {
+    return `/original-pdf/${encodeURIComponent(detail.paper.paper_id)}/${encodeURIComponent(selectedVersion)}/${encodeURIComponent(originalPdfFilename())}`;
   };
 
   const renderCandidateSelects = (candidates) => {
@@ -1150,17 +1265,44 @@ APP_JS = r"""
   };
 
   const renderPdf = (candidates) => {
+    $("translated-pdf-button").classList.toggle("active", pdfSource === "translated");
+    $("original-pdf-button").classList.toggle("active", pdfSource === "original");
     const candidate = candidates.find((c) => c.candidate_id === selectedCandidateId);
     const frame = $("pdf-frame");
     const link = $("open-pdf-link");
+    if (pdfSource === "original") {
+      if (!detail || !selectedVersion) {
+        if (currentPdfUrl) {
+          frame.removeAttribute("src");
+          currentPdfUrl = "";
+        }
+        link.removeAttribute("href");
+        link.textContent = "none";
+        return;
+      }
+      const url = originalPdfUrl();
+      if (currentPdfUrl !== url) {
+        frame.src = url;
+        currentPdfUrl = url;
+      }
+      link.href = url;
+      link.textContent = "原文PDFを開く";
+      return;
+    }
     if (!candidate || !candidate.pdf_path) {
-      frame.removeAttribute("src");
+      if (currentPdfUrl) {
+        frame.removeAttribute("src");
+        currentPdfUrl = "";
+      }
       link.removeAttribute("href");
       link.textContent = candidate ? "ビルド失敗 (TeXタブで編集できます)" : "none";
       return;
     }
     const url = `/pdf/${candidate.candidate_id}/${encodeURIComponent(pdfFilename(candidate))}`;
-    frame.src = url;
+    if (currentPdfUrl !== url) {
+      frame.src = url;
+      currentPdfUrl = url;
+    }
     link.href = url;
     link.textContent = "PDFを開く";
   };
@@ -1413,7 +1555,9 @@ APP_JS = r"""
 
   $("translate-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const submit = event.submitter || $("translate-form").querySelector("button[type='submit']");
     try {
+      if (submit) submit.disabled = true;
       await api("/translate", {
         method: "POST",
         body: JSON.stringify({
@@ -1425,6 +1569,8 @@ APP_JS = r"""
       await loadState();
     } catch (error) {
       alert(error.message);
+    } finally {
+      if (submit) submit.disabled = false;
     }
   });
 
@@ -1473,6 +1619,16 @@ APP_JS = r"""
     loadBuildLogs().catch((error) => setText("build-log-status", error.message));
   });
 
+  $("translated-pdf-button").addEventListener("click", () => {
+    pdfSource = "translated";
+    renderPdf(candidatesForVersion());
+  });
+
+  $("original-pdf-button").addEventListener("click", () => {
+    pdfSource = "original";
+    renderPdf(candidatesForVersion());
+  });
+
   for (const id of ["candidate-select", "tex-candidate-select"]) {
     $(id).addEventListener("change", () => {
       selectedCandidateId = $(id).value;
@@ -1484,10 +1640,14 @@ APP_JS = r"""
 
   document.querySelectorAll(".tab-button").forEach((button) => {
     button.addEventListener("click", () => {
+      activeTab = button.dataset.tab || "pdf";
       document.querySelectorAll(".tab-button").forEach((node) => node.classList.remove("active"));
       document.querySelectorAll(".tab-panel").forEach((node) => node.classList.remove("active"));
       button.classList.add("active");
       $(`tab-${button.dataset.tab}`).classList.add("active");
+      if (activeTab === "build-logs") {
+        loadBuildLogs().catch((error) => setText("build-log-status", error.message));
+      }
     });
   });
 

@@ -25,10 +25,11 @@ import secrets
 import shutil
 import sqlite3
 import threading
+import time
 import traceback
 import uuid
 
-from .arxiv_source import download_and_unpack
+from .arxiv_source import download_and_unpack, download_pdf
 from .build_latex import compile_tex_trying_texlive_versions
 from .config import Config, load_config
 from .japanese_setup import JapaneseLayoutMode
@@ -44,7 +45,8 @@ from .translate import (
     stats_from_jsonl,
     translate_prep_dir,
 )
-from .web_assets import render_admin_html, render_app_html
+from .web_ui.assets import render_admin_html, render_app_html
+from .web_ui.run_artifacts import PdfArtifact, RunArtifacts, discover_run_artifacts
 
 
 LayoutMode = Literal["preserve", "adaptive", "safe"]
@@ -81,6 +83,16 @@ class ArxivMetadata:
     """Small arXiv API metadata payload used by the UI."""
 
     parsed: ParsedArxivId
+    title: str
+
+
+@dataclass(frozen=True)
+class ImportedRunIdentity:
+    """Explicit paper/version identity for a filesystem run."""
+
+    paper_id: str
+    version_label: str
+    effective_arxiv_id: str
     title: str
 
 
@@ -186,21 +198,21 @@ def fetch_latest_arxiv_version(base_id: str) -> ParsedArxivId:
     return fetch_arxiv_metadata(base_id).parsed
 
 
-def fetch_arxiv_metadata(arxiv_id: str) -> ArxivMetadata:
+def fetch_arxiv_metadata(arxiv_id: str, timeout: int = 60) -> ArxivMetadata:
     """Look up an explicit arXiv version and title."""
     query = urlencode({"id_list": arxiv_id, "max_results": "1"})
     request = Request(
         f"{ARXIV_API_URL}?{query}",
         headers={"User-Agent": USER_AGENT},
     )
-    with urlopen(request, timeout=60) as response:
+    with urlopen(request, timeout=timeout) as response:
         payload = response.read()
 
     root = ElementTree.fromstring(payload)
     namespace = {"atom": "http://www.w3.org/2005/Atom"}
     entry = root.find("atom:entry", namespace)
     if entry is None:
-        raise ValueError(f"arXiv id not found: {base_id}")
+        raise ValueError(f"arXiv id not found: {arxiv_id}")
     entry_id = entry.findtext("atom:id", namespaces=namespace)
     if not entry_id:
         raise ValueError(f"arXiv response did not include an entry id for: {arxiv_id}")
@@ -485,6 +497,23 @@ class WebStore:
                 (paper_id, version_label, effective_arxiv_id, str(run_dir), now, now),
             )
 
+    def get_paper_version_by_run_dir(self, run_dir: Path) -> dict[str, Any] | None:
+        """Return the version row already associated with a run directory."""
+        run_dir_str = str(run_dir.resolve())
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT pv.paper_id, pv.version_label, pv.effective_arxiv_id,
+                       pv.run_dir, p.title
+                FROM paper_versions pv
+                JOIN papers p ON p.paper_id = pv.paper_id
+                WHERE pv.run_dir = ?
+                LIMIT 1
+                """,
+                (run_dir_str,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def touch_paper(self, paper_id: str) -> None:
         """Update a paper timestamp."""
         with self.lock, self.connection:
@@ -512,6 +541,7 @@ class WebStore:
                     (
                     SELECT j.status FROM jobs j
                         WHERE j.paper_id = p.paper_id
+                          AND j.status NOT IN ('done', 'failed', 'cancelled')
                         ORDER BY j.created_at DESC
                         LIMIT 1
                     ) AS latest_status
@@ -631,6 +661,11 @@ class WebStore:
             rows = self.connection.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
 
+    def get_paper_version(self, paper_id: str, version_label: str) -> dict[str, Any] | None:
+        """Return one paper version row."""
+        versions = self.get_paper_versions(paper_id, version_label)
+        return versions[0] if versions else None
+
     def list_workspaces_for_paper(
         self,
         paper_id: str,
@@ -701,12 +736,41 @@ class WebStore:
                 ),
             )
 
+    def mark_interrupted_jobs(self) -> int:
+        """Mark jobs that cannot survive a web process restart."""
+        now = utc_now()
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                """
+                UPDATE jobs
+                SET status = CASE
+                        WHEN cancel_requested = 1 OR status = 'canceling' THEN 'cancelled'
+                        ELSE 'failed'
+                    END,
+                    phase = CASE
+                        WHEN cancel_requested = 1 OR status = 'canceling' THEN 'cancelled'
+                        ELSE 'failed'
+                    END,
+                    message = CASE
+                        WHEN cancel_requested = 1 OR status = 'canceling' THEN 'cancelled during restart'
+                        ELSE 'interrupted by server restart'
+                    END,
+                    updated_at = ?
+                WHERE status NOT IN ('done', 'failed', 'cancelled')
+                """,
+                (now,),
+            )
+        return cursor.rowcount
+
     def update_job(self, job_id: str, **fields: Any) -> None:
         """Update selected job fields."""
         if not fields:
             return
         fields["updated_at"] = utc_now()
         allowed = {
+            "paper_id",
+            "version_label",
+            "effective_arxiv_id",
             "status",
             "phase",
             "overall_current",
@@ -878,6 +942,195 @@ class WebStore:
             "created_at": now,
         }
 
+    def upsert_filesystem_candidate(
+        self,
+        *,
+        paper_id: str,
+        version_label: str,
+        label: str,
+        font_mode: str | None,
+        layout_mode: str | None,
+        source_dir: Path,
+        pdf_path: Path,
+    ) -> dict[str, Any]:
+        """Register an already-built PDF without duplicating web-created rows."""
+        now = utc_now()
+        source_dir_str = str(source_dir.resolve())
+        pdf_path_str = str(pdf_path.resolve())
+        with self.lock, self.connection:
+            existing = self.connection.execute(
+                """
+                SELECT * FROM pdf_candidates
+                WHERE paper_id = ? AND version_label = ? AND label = ?
+                  AND (source_dir = ? OR job_id = 'filesystem' OR pdf_path != '')
+                ORDER BY
+                    CASE
+                        WHEN source_dir = ? THEN 0
+                        WHEN job_id = 'filesystem' THEN 1
+                        ELSE 2
+                    END,
+                    is_primary DESC,
+                    created_at ASC
+                LIMIT 1
+                """,
+                (paper_id, version_label, label, source_dir_str, source_dir_str),
+            ).fetchone()
+            primary = self.connection.execute(
+                """
+                SELECT candidate_id FROM pdf_candidates
+                WHERE paper_id = ? AND version_label = ? AND is_primary = 1 AND pdf_path != ''
+                LIMIT 1
+                """,
+                (paper_id, version_label),
+            ).fetchone()
+            should_be_primary = existing is not None and bool(existing["is_primary"])
+            if not should_be_primary and primary is None:
+                should_be_primary = True
+            if existing is not None:
+                self.connection.execute(
+                    """
+                    UPDATE pdf_candidates
+                    SET font_mode = ?, layout_mode = ?, source_dir = ?, pdf_path = ?, is_primary = ?
+                    WHERE candidate_id = ?
+                    """,
+                    (
+                        font_mode,
+                        layout_mode,
+                        source_dir_str,
+                        pdf_path_str,
+                        1 if should_be_primary else 0,
+                        existing["candidate_id"],
+                    ),
+                )
+                candidate_id = str(existing["candidate_id"])
+                created_at = str(existing["created_at"])
+                job_id = str(existing["job_id"])
+            else:
+                candidate_id = uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"arxiv-honyaku:filesystem-candidate:{paper_id}:{version_label}:{label}",
+                ).hex
+                self.connection.execute(
+                    """
+                    INSERT INTO pdf_candidates(
+                        candidate_id, paper_id, version_label, job_id, label,
+                        font_mode, layout_mode, source_dir, pdf_path, is_primary, created_at
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(candidate_id) DO UPDATE SET
+                        font_mode = excluded.font_mode,
+                        layout_mode = excluded.layout_mode,
+                        source_dir = excluded.source_dir,
+                        pdf_path = excluded.pdf_path,
+                        is_primary = CASE
+                            WHEN pdf_candidates.is_primary = 1 THEN 1
+                            ELSE excluded.is_primary
+                        END
+                    """,
+                    (
+                        candidate_id,
+                        paper_id,
+                        version_label,
+                        "filesystem",
+                        label,
+                        font_mode,
+                        layout_mode,
+                        source_dir_str,
+                        pdf_path_str,
+                        1 if should_be_primary else 0,
+                        now,
+                    ),
+                )
+                created_at = now
+                job_id = "filesystem"
+            self.connection.execute(
+                """
+                DELETE FROM pdf_candidates
+                WHERE paper_id = ? AND version_label = ? AND label = ?
+                  AND job_id = 'filesystem' AND candidate_id != ?
+                """,
+                (paper_id, version_label, label, candidate_id),
+            )
+        self.touch_paper(paper_id)
+        return {
+            "candidate_id": candidate_id,
+            "paper_id": paper_id,
+            "version_label": version_label,
+            "job_id": job_id,
+            "label": label,
+            "font_mode": font_mode,
+            "layout_mode": layout_mode,
+            "source_dir": source_dir_str,
+            "pdf_path": pdf_path_str,
+            "is_primary": 1 if should_be_primary else 0,
+            "created_at": created_at,
+        }
+
+    def dedupe_identical_candidates(self) -> int:
+        """Remove exact duplicate PDF candidates from older web runs."""
+        with self.lock, self.connection:
+            groups = self.connection.execute(
+                """
+                SELECT paper_id, version_label, label, source_dir, pdf_path, COUNT(*) AS count
+                FROM pdf_candidates
+                WHERE pdf_path != ''
+                GROUP BY paper_id, version_label, label, source_dir, pdf_path
+                HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+            deleted = 0
+            touched: set[str] = set()
+            for group in groups:
+                rows = self.connection.execute(
+                    """
+                    SELECT candidate_id, is_primary, created_at
+                    FROM pdf_candidates
+                    WHERE paper_id = ? AND version_label = ? AND label = ?
+                      AND source_dir = ? AND pdf_path = ?
+                    ORDER BY is_primary DESC, created_at ASC, candidate_id ASC
+                    """,
+                    (
+                        group["paper_id"],
+                        group["version_label"],
+                        group["label"],
+                        group["source_dir"],
+                        group["pdf_path"],
+                    ),
+                ).fetchall()
+                if len(rows) <= 1:
+                    continue
+                keep = rows[0]["candidate_id"]
+                duplicate_ids = [row["candidate_id"] for row in rows[1:]]
+                placeholders = ",".join("?" for _ in duplicate_ids)
+                self.connection.execute(
+                    f"DELETE FROM pdf_candidates WHERE candidate_id IN ({placeholders})",
+                    duplicate_ids,
+                )
+                deleted += len(duplicate_ids)
+                touched.add(str(group["paper_id"]))
+                if rows[0]["is_primary"]:
+                    continue
+                primary = self.connection.execute(
+                    """
+                    SELECT 1 FROM pdf_candidates
+                    WHERE paper_id = ? AND version_label = ? AND is_primary = 1 AND pdf_path != ''
+                    LIMIT 1
+                    """,
+                    (group["paper_id"], group["version_label"]),
+                ).fetchone()
+                if primary is None:
+                    self.connection.execute(
+                        "UPDATE pdf_candidates SET is_primary = 1 WHERE candidate_id = ?",
+                        (keep,),
+                    )
+            now = utc_now()
+            for paper_id in touched:
+                self.connection.execute(
+                    "UPDATE papers SET updated_at = ? WHERE paper_id = ?",
+                    (now, paper_id),
+                )
+        return deleted
+
     def has_candidates(self, paper_id: str, version_label: str) -> bool:
         """Return whether candidates already exist."""
         with self.lock:
@@ -1034,6 +1287,10 @@ class WebApplication:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.store = WebStore(db_path or (self.runs_dir / "web.sqlite3"))
         self.admin_token = self.store.get_admin_token()
+        self._filesystem_sync_lock = threading.Lock()
+        self._last_filesystem_sync = 0.0
+        self.store.mark_interrupted_jobs()
+        self.sync_filesystem_runs(force=True)
         self.migrate_legacy_latest_versions()
         self.migrate_missing_paper_titles()
         concurrency = int(os.environ.get("ARXIV_HONYAKU_WEB_CONCURRENCY", "1"))
@@ -1053,6 +1310,89 @@ class WebApplication:
     def admin_url(self) -> str:
         """Absolute admin URL."""
         return f"{self.base_url}/admin/{self.admin_token}"
+
+    def sync_filesystem_runs(self, *, force: bool = False) -> int:
+        """Import completed PDFs that were produced outside the web UI."""
+        now = time.monotonic()
+        if not force and now - self._last_filesystem_sync < 5:
+            return 0
+        if not self._filesystem_sync_lock.acquire(blocking=False):
+            return 0
+        try:
+            self._last_filesystem_sync = now
+            imported = 0
+            for run in discover_run_artifacts(self.runs_dir):
+                identity = self.resolve_filesystem_run_identity(run)
+                if identity is None:
+                    continue
+                title = identity.title or run.title
+                self.store.upsert_paper_version(
+                    paper_id=identity.paper_id,
+                    version_label=identity.version_label,
+                    effective_arxiv_id=identity.effective_arxiv_id,
+                    run_dir=run.run_dir,
+                    title=title,
+                )
+                for artifact in run.pdfs:
+                    self.import_filesystem_pdf(identity, artifact)
+                    imported += 1
+            self.store.dedupe_identical_candidates()
+            return imported
+        finally:
+            self._filesystem_sync_lock.release()
+
+    def resolve_filesystem_run_identity(
+        self,
+        run: RunArtifacts,
+    ) -> ImportedRunIdentity | None:
+        """Resolve a run directory name to an explicit arXiv version."""
+        existing = self.store.get_paper_version_by_run_dir(run.run_dir)
+        if existing is not None:
+            return ImportedRunIdentity(
+                paper_id=str(existing["paper_id"]),
+                version_label=str(existing["version_label"]),
+                effective_arxiv_id=str(existing["effective_arxiv_id"]),
+                title=str(existing.get("title") or ""),
+            )
+        try:
+            parsed = extract_arxiv_id(run.run_dir.name)
+        except ValueError as error:
+            print(f"Could not import filesystem run {run.run_dir}: {error}")
+            return None
+        if parsed.version is not None:
+            return ImportedRunIdentity(
+                paper_id=parsed.base_id,
+                version_label=parsed.version_label,
+                effective_arxiv_id=parsed.effective_id,
+                title=run.title,
+            )
+        try:
+            metadata = fetch_arxiv_metadata(parsed.base_id, timeout=15)
+        except Exception as error:
+            print(f"Could not resolve version for filesystem run {run.run_dir}: {error}")
+            return None
+        return ImportedRunIdentity(
+            paper_id=metadata.parsed.base_id,
+            version_label=metadata.parsed.version_label,
+            effective_arxiv_id=metadata.parsed.effective_id,
+            title=metadata.title or run.title,
+        )
+
+    def import_filesystem_pdf(
+        self,
+        identity: ImportedRunIdentity,
+        artifact: PdfArtifact,
+    ) -> dict[str, Any]:
+        """Register one discovered PDF artifact in the web store."""
+        return self.store.upsert_filesystem_candidate(
+            paper_id=identity.paper_id,
+            version_label=identity.version_label,
+            label=artifact.label,
+            font_mode=artifact.font_mode,
+            layout_mode=artifact.layout_mode,
+            source_dir=artifact.source_dir,
+            pdf_path=artifact.pdf_path,
+        )
 
     def migrate_legacy_latest_versions(self) -> None:
         """Best-effort migration of old 'latest' records to explicit vN labels."""
@@ -1207,6 +1547,9 @@ class WebApplication:
             if method == "GET" and len(parts) in {2, 3} and parts[0] == "pdf":
                 self.handle_pdf(handler, parts[1])
                 return
+            if method == "GET" and len(parts) in {3, 4} and parts[0] == "original-pdf":
+                self.handle_original_pdf(handler, parts[1], parts[2])
+                return
             self.send_error(handler, HTTPStatus.NOT_FOUND, "not found")
         except ValueError as error:
             self.send_error(handler, HTTPStatus.BAD_REQUEST, str(error))
@@ -1258,6 +1601,7 @@ class WebApplication:
             return
         route = parts[2:]
         if method == "GET" and route == ["state"]:
+            self.sync_filesystem_runs()
             self.send_json(handler, {
                 "user": user,
                 "papers": self.store.list_papers(token),
@@ -1438,6 +1782,40 @@ class WebApplication:
             download_filename=pdf_download_filename(candidate),
         )
 
+    def handle_original_pdf(
+        self,
+        handler: BaseHTTPRequestHandler,
+        paper_id: str,
+        version_label: str,
+    ) -> None:
+        """Download if needed and serve the original arXiv PDF."""
+        version = self.store.get_paper_version(paper_id, version_label)
+        if version is None:
+            self.send_error(handler, HTTPStatus.NOT_FOUND, "unknown paper version")
+            return
+        try:
+            pdf_path = self.ensure_original_pdf(version)
+        except Exception as error:
+            self.send_error(handler, HTTPStatus.BAD_GATEWAY, str(error))
+            return
+        self.send_file(
+            handler,
+            pdf_path,
+            content_type="application/pdf",
+            download_filename=pdf_download_filename({
+                "paper_id": paper_id,
+                "version_label": version_label,
+            }),
+        )
+
+    def ensure_original_pdf(self, version: dict[str, Any]) -> Path:
+        """Ensure the official arXiv PDF exists for a paper version."""
+        run_dir = Path(version["run_dir"])
+        pdf_path = run_dir / "downloads" / "original.pdf"
+        if pdf_path.is_file():
+            return pdf_path
+        return download_pdf(str(version["effective_arxiv_id"]), pdf_path)
+
     def users_with_urls(self) -> list[dict[str, Any]]:
         """List users with absolute URLs."""
         return [
@@ -1551,38 +1929,27 @@ class WebApplication:
         force: bool,
     ) -> dict[str, Any]:
         """Create and start a translation job."""
-        metadata = resolve_arxiv_metadata(extract_arxiv_id(raw_input))
-        parsed = metadata.parsed
+        parsed = extract_arxiv_id(raw_input)
         selected_layouts = self.normalize_layouts(layouts)
-        effective_id = parsed.effective_id
-        version_label = parsed.version_label
-        run_dir = self.runs_dir / safe_run_name(effective_id)
-        self.store.upsert_paper_version(
-            paper_id=parsed.base_id,
-            version_label=version_label,
-            effective_arxiv_id=effective_id,
-            run_dir=run_dir,
-            title=metadata.title,
-        )
         job_id = uuid.uuid4().hex
         self.store.insert_job(
             job_id=job_id,
             job_type="translate",
             user_token=user_token,
             paper_id=parsed.base_id,
-            version_label=version_label,
-            effective_arxiv_id=effective_id,
+            version_label=parsed.version,
+            effective_arxiv_id=parsed.effective_id if parsed.version else None,
             selected_layout_modes=selected_layouts,
             force=force,
             message="queued",
         )
         thread = threading.Thread(
-            target=self.run_translation_job,
-            args=(job_id, parsed.base_id, version_label, effective_id, run_dir, selected_layouts, force),
+            target=self.run_translation_job_from_input,
+            args=(job_id, parsed, selected_layouts, force),
             daemon=True,
         )
         thread.start()
-        return {"job_id": job_id, "paper_id": parsed.base_id, "version_label": version_label}
+        return {"job_id": job_id, "paper_id": parsed.base_id, "version_label": parsed.version}
 
     def normalize_layouts(self, value: Any) -> list[LayoutMode]:
         """Validate selected layout modes."""
@@ -1602,6 +1969,75 @@ class WebApplication:
             update={"japanese_layout_modes": cast(list[JapaneseLayoutMode], layouts)}
         )
         return self.config.model_copy(update={"run": run})
+
+    def run_translation_job_from_input(
+        self,
+        job_id: str,
+        parsed: ParsedArxivId,
+        layouts: list[LayoutMode],
+        force: bool,
+    ) -> None:
+        """Resolve arXiv metadata after the queued job is visible."""
+        try:
+            self.raise_if_cancelled(job_id)
+            self.store.update_job(
+                job_id,
+                status="running",
+                phase="resolve",
+                overall_current=0,
+                overall_total=1,
+                phase_current=0,
+                phase_total=1,
+                message="arXiv version",
+            )
+            metadata = resolve_arxiv_metadata(parsed)
+            resolved = metadata.parsed
+            effective_id = resolved.effective_id
+            version_label = resolved.version_label
+            run_dir = self.runs_dir / safe_run_name(effective_id)
+            self.store.upsert_paper_version(
+                paper_id=resolved.base_id,
+                version_label=version_label,
+                effective_arxiv_id=effective_id,
+                run_dir=run_dir,
+                title=metadata.title,
+            )
+            self.store.update_job(
+                job_id,
+                paper_id=resolved.base_id,
+                version_label=version_label,
+                effective_arxiv_id=effective_id,
+                status="queued",
+                phase="queued",
+                message="queued",
+            )
+            self.run_translation_job(
+                job_id,
+                resolved.base_id,
+                version_label,
+                effective_id,
+                run_dir,
+                layouts,
+                force,
+            )
+        except JobCancelled:
+            self.store.update_job(
+                job_id,
+                status="cancelled",
+                phase="cancelled",
+                message="cancelled",
+                cancel_requested=1,
+            )
+            self.log(job_id, "info", "cancelled")
+        except Exception as error:
+            self.log(job_id, "error", str(error))
+            self.log(job_id, "error", traceback.format_exc())
+            self.store.update_job(
+                job_id,
+                status="failed",
+                phase="failed",
+                message=str(error),
+            )
 
     def run_translation_job(
         self,

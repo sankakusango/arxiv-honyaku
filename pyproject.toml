@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arxiv-honyaku"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "openai",
+    "python-dotenv",
+    "pydantic-settings",
+    "tqdm",
+]
+
+[project.scripts]
+arxiv-honyaku = "arxiv_honyaku.cli:main"
+arxiv-honyaku-web = "arxiv_honyaku.web:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+arxiv_honyaku = ["config.base.toml"]

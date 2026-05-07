@@ -38,3 +38,9 @@ def unpack(archive_path: Path, extract_dir: Path) -> None:
     extract_dir.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive_path, mode="r:*") as tar_archive:
         tar_archive.extractall(extract_dir, filter="data")
+
+def download_and_unpack(arxiv_id: str, download_dir: Path, unpack_dir: Path) -> None:
+    """ダウンロードと解凍をする."""
+    tar_path = download_dir / "source.tar"
+    download(arxiv_id, tar_path)
+    unpack(tar_path, unpack_dir)

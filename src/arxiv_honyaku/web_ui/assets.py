@@ -33,16 +33,17 @@ def render_app_html(initial_state: dict[str, Any]) -> str:
           <label class="field-label" for="arxiv-input">arXiv</label>
           <input id="arxiv-input" name="arxiv" type="text" placeholder="1234.56789v2 / URL" autocomplete="off" required>
 
-          <div>
-            <div class="field-label">Layout</div>
-            <div class="check-grid" id="layout-options"></div>
+          <div class="translate-submit-row">
+            <button class="primary-button" type="submit">翻訳</button>
           </div>
 
-          <div class="button-row">
-            <button class="primary-button" type="submit">翻訳</button>
-            <label class="force-toggle">
+          <div class="translate-options">
+            <div class="translate-options-title">翻訳オプション</div>
+            <div class="field-label">Layout</div>
+            <div class="check-grid" id="layout-options"></div>
+            <label class="force-toggle" id="force-toggle">
               <input id="force-input" type="checkbox">
-              <span>再実行</span>
+              <span>既存も作り直す</span>
             </label>
           </div>
         </form>
@@ -68,7 +69,6 @@ def render_app_html(initial_state: dict[str, Any]) -> str:
         <section class="paper-detail" id="paper-detail" hidden>
           <div class="paper-toolbar">
             <div class="paper-title-wrap">
-              <button class="star-button" id="star-button" type="button" aria-label="star"></button>
               <div>
                 <h1 id="paper-title"></h1>
                 <a class="paper-link" id="arxiv-link" target="_blank" rel="noreferrer">arXiv</a>
@@ -277,6 +277,21 @@ button {
   border-bottom: 1px solid var(--line);
 }
 
+.translate-options {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8faf7;
+}
+
+.translate-options-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .field-label {
   display: block;
   margin-bottom: 5px;
@@ -312,21 +327,54 @@ textarea:focus {
 
 .check-grid label,
 .force-toggle {
+  position: relative;
   min-height: 34px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  justify-content: center;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 7px 9px;
   background: var(--panel);
-  color: var(--text);
+  color: var(--muted);
   font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
 }
 
 .check-grid input,
 .force-toggle input {
-  width: auto;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.check-grid input:focus,
+.force-toggle input:focus {
+  box-shadow: none;
+}
+
+.check-grid label.selected,
+.force-toggle.active {
+  border-color: #bddcc6;
+  background: #edf8f0;
+  color: #205f42;
+}
+
+.check-grid label:hover,
+.force-toggle:hover {
+  border-color: #bdd2cd;
+}
+
+.check-grid label:focus-within,
+.force-toggle:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(47, 111, 115, 0.12);
 }
 
 .button-row {
@@ -334,6 +382,11 @@ textarea:focus {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.translate-submit-row {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .primary-button,
@@ -424,6 +477,30 @@ textarea:focus {
 .paper-id {
   font-weight: 700;
   word-break: break-word;
+}
+
+.paper-star-button {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.paper-star-button:hover {
+  border-color: rgba(183, 121, 31, 0.35);
+  background: rgba(183, 121, 31, 0.06);
+}
+
+.paper-star-button.active {
+  color: var(--amber);
 }
 
 .paper-title-small {
@@ -611,25 +688,6 @@ progress {
 .paper-link {
   color: var(--accent-strong);
   font-size: 12px;
-}
-
-.star-button {
-  width: 36px;
-  height: 36px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: var(--panel);
-  color: var(--muted);
-  font-size: 19px;
-}
-
-.star-button.active {
-  color: var(--amber);
-  border-color: rgba(183, 121, 31, 0.45);
-  background: rgba(183, 121, 31, 0.08);
 }
 
 .toolbar-controls,
@@ -957,6 +1015,7 @@ APP_JS = r"""
   let activeTab = "pdf";
   let detailRequestSeq = 0;
   const detailCache = new Map();
+  const starRequestSeq = new Map();
 
   const $ = (id) => document.getElementById(id);
 
@@ -1040,12 +1099,61 @@ APP_JS = r"""
     wrap.replaceChildren();
     for (const mode of layoutModes) {
       const label = document.createElement("label");
+      label.className = "selected";
       const input = document.createElement("input");
       input.type = "checkbox";
       input.value = mode;
       input.checked = true;
-      label.append(input, document.createTextNode(mode));
+      input.addEventListener("change", () => {
+        label.classList.toggle("selected", input.checked);
+      });
+      const text = document.createElement("span");
+      text.textContent = mode;
+      label.append(input, text);
       wrap.append(label);
+    }
+  };
+
+  const updateForceToggle = () => {
+    $("force-toggle").classList.toggle("active", $("force-input").checked);
+  };
+
+  const applyPaperStar = (paperId, starred) => {
+    const value = starred ? 1 : 0;
+    const paper = papers.find((item) => item.paper_id === paperId);
+    if (paper) paper.starred = value;
+    if (detail && detail.paper.paper_id === paperId) {
+      detail.meta.starred = value;
+    }
+    const cached = detailCache.get(paperId);
+    if (cached) cached.meta.starred = value;
+    renderPapers();
+  };
+
+  const togglePaperStar = async (paperId) => {
+    const paper = papers.find((item) => item.paper_id === paperId);
+    const previous = Boolean(paper ? paper.starred : detail && detail.meta.starred);
+    const next = !previous;
+    const seq = (starRequestSeq.get(paperId) || 0) + 1;
+    starRequestSeq.set(paperId, seq);
+    applyPaperStar(paperId, next);
+    try {
+      const payload = await api(`/papers/${encodeURIComponent(paperId)}/star`, {
+        method: "POST",
+        body: JSON.stringify({ starred: next }),
+      });
+      if (starRequestSeq.get(paperId) === seq) {
+        applyPaperStar(paperId, Boolean(payload.starred));
+      }
+    } catch (error) {
+      if (starRequestSeq.get(paperId) === seq) {
+        applyPaperStar(paperId, previous);
+        alert(error.message);
+      }
+    } finally {
+      if (starRequestSeq.get(paperId) === seq) {
+        starRequestSeq.delete(paperId);
+      }
     }
   };
 
@@ -1059,6 +1167,7 @@ APP_JS = r"""
       item.tabIndex = 0;
       item.addEventListener("click", () => loadPaper(paper.paper_id));
       item.addEventListener("keydown", (event) => {
+        if (event.target !== item) return;
         if (event.key === "Enter") loadPaper(paper.paper_id);
       });
 
@@ -1067,9 +1176,16 @@ APP_JS = r"""
       const id = document.createElement("div");
       id.className = "paper-id";
       id.textContent = paper.paper_id;
-      const star = document.createElement("div");
+      const star = document.createElement("button");
+      star.className = `paper-star-button${paper.starred ? " active" : ""}`;
+      star.type = "button";
+      star.setAttribute("aria-label", paper.starred ? "スターを外す" : "スターを付ける");
+      star.setAttribute("aria-pressed", paper.starred ? "true" : "false");
       star.textContent = paper.starred ? "★" : "☆";
-      star.style.color = paper.starred ? "var(--amber)" : "var(--muted)";
+      star.addEventListener("click", (event) => {
+        event.stopPropagation();
+        togglePaperStar(paper.paper_id).catch((error) => alert(error.message));
+      });
       top.append(id, star);
 
       const meta = document.createElement("div");
@@ -1198,9 +1314,6 @@ APP_JS = r"""
     setText("paper-title", detail.paper.title || detail.paper.paper_id);
     $("arxiv-link").href = `https://arxiv.org/abs/${detail.paper.paper_id}`;
     $("arxiv-link").textContent = detail.paper.paper_id;
-    const star = $("star-button");
-    star.textContent = detail.meta.starred ? "★" : "☆";
-    star.classList.toggle("active", Boolean(detail.meta.starred));
     $("paper-note").value = detail.meta.note || "";
 
     const versionSelect = $("paper-version-select");
@@ -1574,15 +1687,8 @@ APP_JS = r"""
     }
   });
 
-  $("star-button").addEventListener("click", async () => {
-    if (!selectedPaperId) return;
-    const payload = await api(`/papers/${encodeURIComponent(selectedPaperId)}/star`, {
-      method: "POST",
-      body: JSON.stringify({ starred: !detail.meta.starred }),
-    });
-    detail.meta.starred = payload.starred;
-    await loadState();
-    renderDetail();
+  $("force-input").addEventListener("change", () => {
+    updateForceToggle();
   });
 
   $("save-note-button").addEventListener("click", async () => {
@@ -1701,6 +1807,7 @@ APP_JS = r"""
   });
 
   renderLayouts();
+  updateForceToggle();
   setText("user-name", user.display_name || "");
   loadState().catch((error) => alert(error.message));
   setInterval(() => {

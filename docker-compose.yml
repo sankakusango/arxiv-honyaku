@@ -1,0 +1,24 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PYTHONPATH: /workspace/src
+      ARXIV_HONYAKU_WEB_CONCURRENCY: ${ARXIV_HONYAKU_WEB_CONCURRENCY:-1}
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    ports:
+      - "${ARXIV_HONYAKU_WEB_PORT:-8000}:8000"
+    command:
+      - python
+      - -m
+      - arxiv_honyaku.web
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --base-url
+      - "http://localhost:${ARXIV_HONYAKU_WEB_PORT:-8000}"

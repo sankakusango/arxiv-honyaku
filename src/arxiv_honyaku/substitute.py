@@ -67,6 +67,7 @@ _UNPROTECTED_COMMANDS = frozenset({
     "textbf", "emph", "textit", "textsc", "textrm", "textsf", "texttt",
     "underline",
 })
+_DEFINITION_COMMANDS = frozenset({"def", "gdef", "edef", "xdef"})
 
 _INLINE_MATH_RE = re.compile(
     r"(?<!\\)\$\$.+?(?<!\\)\$\$"   # display $$...$$
@@ -118,7 +119,10 @@ def substitute(tex_text: str) -> tuple[str, list[Substitution]]:
     # ③-a: 構造ブロック (begin/end ペア). ネストしない前提でゆるくマッチ.
     out = _substitute_environments(out, pool, make_placeholder)
 
-    # ③-b: インライン数式.
+    # ③-b: TeX primitive のマクロ定義.
+    out = _substitute_definition_commands(out, pool, make_placeholder)
+
+    # ③-c: インライン数式.
     out = _substitute_inline_math(out, pool, make_placeholder)
 
     # ④: 連続する保護コマンド.
@@ -290,6 +294,88 @@ def _substitute_inline_math(
         cursor = match.end()
     out_parts.append(text[cursor:])
     return "".join(out_parts)
+
+
+def _substitute_definition_commands(
+    text: str,
+    pool: list[Substitution],
+    make_placeholder,
+) -> str:
+    """TeX primitive の ``\\def\\foo#1{...}`` 定義全体を placeholder へ."""
+    out_parts: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        start = _find_next_definition_command(text, cursor)
+        if start is None:
+            out_parts.append(text[cursor:])
+            break
+        end = _consume_definition_command(text, start)
+        if end is None:
+            out_parts.append(text[cursor:start + 1])
+            cursor = start + 1
+            continue
+        out_parts.append(text[cursor:start])
+        ph = make_placeholder()
+        pool.append(Substitution(
+            placeholder=ph,
+            kind="definition_command",
+            original=text[start:end],
+        ))
+        out_parts.append(ph)
+        cursor = end
+    return "".join(out_parts)
+
+
+def _find_next_definition_command(text: str, start: int) -> int | None:
+    """次の ``\\def`` 系 primitive command の開始位置を返す."""
+    cursor = start
+    while cursor < len(text):
+        command_start = text.find("\\", cursor)
+        if command_start < 0:
+            return None
+        parsed = _parse_command(text, command_start)
+        if parsed is not None and parsed[0] in _DEFINITION_COMMANDS:
+            return command_start
+        cursor = command_start + 1
+    return None
+
+
+def _consume_definition_command(text: str, start: int) -> int | None:
+    """``\\def`` 系 primitive 定義の終端 index を返す."""
+    parsed = _parse_command(text, start)
+    if parsed is None or parsed[0] not in _DEFINITION_COMMANDS:
+        return None
+    cursor = _consume_inline_space(text, parsed[1])
+    if cursor >= len(text):
+        return None
+
+    if text[cursor] == "\\":
+        target = _parse_command(text, cursor)
+        if target is None:
+            return None
+        cursor = target[1]
+    else:
+        # ``\def~{...}`` のような 1 token command も TeX としてはあり得る.
+        cursor += 1
+
+    body_start = _find_definition_body_start(text, cursor)
+    if body_start is None:
+        return None
+    end = _skip_balanced(text, body_start, open_ch="{", close_ch="}")
+    return end if end >= 0 else None
+
+
+def _find_definition_body_start(text: str, start: int) -> int | None:
+    """parameter text の後ろにある replacement body の ``{`` を探す."""
+    cursor = start
+    while cursor < len(text):
+        if text[cursor] == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+        if text[cursor] == "{":
+            return cursor
+        cursor += 1
+    return None
 
 
 def _substitute_command_runs(

@@ -1,0 +1,13 @@
+[llm]
+max_concurrency = 100
+translation_logic = "general_chat"
+
+[llm.client]
+
+[llm.generation]
+
+[run]
+runs_dir = "runs"
+texlive_versions = [2025, 2023]
+japanese_font_modes = ["paper-like"]   # subset of "paper-like" | "compat" (not recommended)
+japanese_layout_modes = ["safe"]       # subset of "preserve" | "adaptive" | "safe"

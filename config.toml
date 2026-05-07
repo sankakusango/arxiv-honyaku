@@ -1,0 +1,14 @@
+[llm]
+max_concurrency = 100
+translation_logic = "general_chat"
+
+[llm.client]
+base_url = "https://api.deepseek.com"
+
+[llm.generation]
+model = "deepseek-v4-flash"
+
+[run]
+runs_dir = "runs"
+japanese_font_modes = ["paper-like"]
+japanese_layout_modes = ["preserve", "adaptive", "safe"]

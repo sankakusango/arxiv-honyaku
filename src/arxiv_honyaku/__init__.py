@@ -1,5 +1,5 @@
 """arxiv-honyaku."""
-from .arxiv_source import download_and_unpack
+from .arxiv_source import download_and_unpack, download_pdf
 from .config import load_config
 from .build_latex import compile_tex_trying_texlive_versions, find_main_tex
 from .source_tree import load_source_tree, resolve_source_root, save_source_tree
